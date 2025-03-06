@@ -6,13 +6,15 @@ import (
 )
 
 type RpcNode struct {
-	Client  *rpc.Client
-	Address string
-	Port    int
+	Client   *rpc.Client
+	Address  string
+	RaftPort int
+	HttpPort int
+	Index    int
 }
 
 func (r *RpcNode) GetClient() (*rpc.Client, error) {
-	client, err := rpc.Dial("tcp", fmt.Sprintf("%s:%d", r.Address, r.Port))
+	client, err := rpc.Dial("tcp", fmt.Sprintf("%s:%d", r.Address, r.RaftPort))
 	if err != nil {
 		return nil, err
 	}

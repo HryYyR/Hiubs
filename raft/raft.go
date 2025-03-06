@@ -6,11 +6,14 @@ import (
 	"math"
 	"math/rand"
 	"net/rpc"
+	"os"
 	"raft/labgob"
 	"sync"
 	"sync/atomic"
 	"time"
 )
+
+var raftCluster *Raft
 
 const (
 	Follower = iota
@@ -43,11 +46,12 @@ type Entry struct {
 }
 
 type Raft struct {
-	mu        sync.Mutex // 锁，保护该节点状态的并发访问
-	peers     []*RpcNode // 所有节点的 RPC 终端
-	persister *Persister // 用于保存该节点的持久状态
-	me        int        // 节点在 peers[] 中的索引
-	dead      int32      // 通过 Kill() 设置，标记节点是否已被终止
+	StateMachine sync.Map
+	mu           sync.Mutex // 锁，保护该节点状态的并发访问
+	peers        []*RpcNode // 所有节点的 RPC 终端
+	persister    *Persister // 用于保存该节点的持久状态
+	me           int        // 节点在 peers[] 中的索引
+	dead         int32      // 通过 Kill() 设置，标记节点是否已被终止
 
 	// 用于存放 Raft 节点的状态数据（在 3A、3B、3C 中实现）。
 	// 详见论文图 2 中 Raft 服务器需要维护的状态描述。
@@ -95,6 +99,14 @@ type AppendEntriesArgs struct {
 	LeaderCommit int     // leader’s commitIndex
 }
 
+func GetRaftCluster() *Raft {
+	return raftCluster
+}
+func SetRaftCluster(cluster *Raft) *Raft {
+	raftCluster = cluster
+	return raftCluster
+}
+
 func (rf *Raft) persist() {
 	fmt.Printf("server %v 开始持久化, 最后一个持久化的log为: %v:%v", rf.me, len(rf.log)-1, rf.log[len(rf.log)-1].Cmd)
 	w := new(bytes.Buffer)
@@ -126,12 +138,18 @@ func (rf *Raft) readPersist(data []byte) {
 	if d.Decode(&votedFor) != nil ||
 		d.Decode(&currentTerm) != nil ||
 		d.Decode(&log) != nil {
-		fmt.Printf("读取持久化数据失败！\n")
+		panic("读取持久化数据失败！\n")
 	} else {
 		rf.votedFor = votedFor
 		rf.currentTerm = currentTerm
 		rf.log = log
-		rf.persist()
+		//rf.persist()
+		for _, entry := range rf.log {
+			if entry.Cmd == nil {
+				continue
+			}
+			rf.HandleCommand(entry.Cmd.(string))
+		}
 	}
 }
 
@@ -146,7 +164,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	newEntry := &Entry{Term: rf.currentTerm, Cmd: command}
 	rf.log = append(rf.log, *newEntry)
-	rf.persist()
 	return len(rf.log) - 1, rf.currentTerm, true
 }
 
@@ -221,14 +238,29 @@ func (rf *Raft) killed() bool {
 	return z == 1
 }
 
-func Make(peers []*RpcNode, me int, persist []byte) *Raft {
+func Make(peers []*RpcNode, index int, PersistFileName string) *Raft {
 	rf := &Raft{}
 
-	persister := &Persister{}
+	//读取持久化文件
+	persist, err := os.ReadFile(fmt.Sprintf("./%s%d.txt", PersistFileName, index))
+	if err != nil {
+		fmt.Println("读取文件失败:", err)
+		create, err := os.Create(fmt.Sprintf("./%s%d.txt", PersistFileName, index))
+		if err != nil {
+			panic(err)
+		}
+		create.Close()
+	}
+	persister := &Persister{
+		filename: PersistFileName,
+	}
 	rf.persister = persister
+
+	rf.StateMachine = sync.Map{}
 	rf.peers = peers
-	rf.me = me
+	rf.me = index
 	rf.role = Follower
+	rf.applyCh = make(chan ApplyMsg, 1024)
 
 	rf.readPersist(persist)
 
@@ -249,6 +281,7 @@ func Make(peers []*RpcNode, me int, persist []byte) *Raft {
 
 	go rf.ticker()
 	go rf.CommitChecker()
+	go rf.ApplyState()
 
 	return rf
 }
@@ -265,7 +298,7 @@ func (rf *Raft) CommitChecker() {
 				CommandIndex: rf.lastApplied,
 			}
 			fmt.Printf("server %v 准备将命令 %v(索引为 %v ) 应用到状态机\n", rf.me, msg.Command, msg.CommandIndex)
-			//rf.applyCh <- *msg
+			rf.applyCh <- *msg
 		}
 		rf.mu.Unlock()
 		time.Sleep(time.Duration(CommitCheckTimeInterval) * time.Millisecond)
@@ -307,7 +340,7 @@ func (rf *Raft) SendHeartBeats() {
 			} else {
 				// 如果没有新的log发送, 就发送一个长度为0的切片, 表示心跳
 				args.Entries = make([]Entry, 0)
-				fmt.Printf("leader %v 开始向 server %v 广播新的心跳, args = %+v \n", rf.me, i, args)
+				//fmt.Printf("leader %v 开始向 server %v 广播新的心跳, args = %+v \n", rf.me, i, args)
 			}
 
 			go rf.handleAppendEntries(i, args)
@@ -434,7 +467,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 
 	if args.Entries == nil {
 		// 心跳函数
-		fmt.Printf("server %v 接收到 leader &%v 的心跳\n", rf.me, args.LeaderId)
+		//fmt.Printf("server %v 接收到 leader &%v 的心跳\n", rf.me, args.LeaderId)
 	} else {
 		fmt.Printf("server %v 收到 leader %v 的的AppendEntries: %+v \n", rf.me, args.LeaderId, args)
 	}
@@ -621,7 +654,7 @@ func (rf *Raft) sendAppendEntries(index int, args *AppendEntriesArgs, reply *App
 func (rf *Raft) sendRequestVote(index int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	client, err := rf.peers[index].GetClient()
 	if err != nil {
-		//fmt.Println("获取", index, "客户端失败：", err)
+		fmt.Println("获取", index, "客户端失败：", err)
 		return false
 	}
 	defer func(client *rpc.Client) {
@@ -629,7 +662,7 @@ func (rf *Raft) sendRequestVote(index int, args *RequestVoteArgs, reply *Request
 	}(client)
 	err = client.Call("Raft.RequestVote", args, reply)
 	if err != nil {
-		//fmt.Println("调用", index, "rpc失败：", err)
+		fmt.Println("调用", index, "rpc失败：", err)
 		return false
 	}
 	return true

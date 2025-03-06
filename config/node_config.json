@@ -1,0 +1,22 @@
+{
+  "node_list": [
+    {
+      "node_index": 0,
+      "node_ip": "127.0.0.1",
+      "node_raft_port": 1233,
+      "node_http_port": 8080
+    },
+    {
+      "node_index": 1,
+      "node_ip": "127.0.0.1",
+      "node_raft_port": 1234,
+      "node_http_port": 8081
+    },
+    {
+      "node_index": 2,
+      "node_ip": "127.0.0.1",
+      "node_raft_port": 1235,
+      "node_http_port": 8082
+    }
+  ]
+}
