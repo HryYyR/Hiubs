@@ -37,7 +37,7 @@ func (rf *Raft) ReadSnapShot(PersistFileName string, index int) bool {
 
 func (rf *Raft) SaveSnapShot() {
 	rf.SnapShot.Data = rf.StateMachine.all()
-	rf.SnapShot.Term = rf.currentTerm
+	rf.SnapShot.Term = rf.log[rf.lastApplied].Term
 	rf.SnapShot.Index = rf.lastApplied
 	bytes, err := json.Marshal(rf.SnapShot)
 	if err != nil {

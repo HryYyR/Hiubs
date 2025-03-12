@@ -42,8 +42,9 @@ type ApplyMsg struct {
 }
 
 type Entry struct {
-	Term int
-	Cmd  interface{}
+	Index int
+	Term  int
+	Cmd   interface{}
 }
 
 type Raft struct {
@@ -89,16 +90,6 @@ type RequestVoteArgs struct {
 type RequestVoteReply struct {
 	Term        int  // currentTerm, for candidate to update itself
 	VoteGranted bool // true means candidate received vote
-}
-
-type AppendEntriesArgs struct {
-	// Your data here (2A, 2B).
-	Term         int     // leader’s term
-	LeaderId     int     // so follower can redirect clients
-	PrevLogIndex int     // index of log entry immediately preceding new ones
-	PrevLogTerm  int     // term of prevLogIndex entry
-	Entries      []Entry // log entries to store (empty for heartbeat; may send more than one for efficiency)
-	LeaderCommit int     // leader’s commitIndex
 }
 
 func GetRaftCluster() *Raft {
@@ -154,12 +145,14 @@ func (rf *Raft) readPersist(PersistFileName string, index int) {
 		d.Decode(&log) != nil {
 		panic("读取持久化数据失败！\n")
 	} else {
+		fmt.Printf("logs: %+v\n", log)
 		rf.votedFor = votedFor
 		rf.currentTerm = currentTerm
 		rf.log = log
 		//rf.persist()
 		for _, entry := range rf.log {
-			if entry.Cmd == nil {
+			//跳过 空指令 和 已被保存到快照 的日志
+			if entry.Cmd == nil || entry.Index <= rf.SnapShot.Index {
 				continue
 			}
 			rf.StateMachine.HandleCommand(entry.Cmd.(string))
@@ -176,16 +169,10 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		return -1, -1, false
 	}
 
-	newEntry := &Entry{Term: rf.currentTerm, Cmd: command}
+	newEntry := &Entry{Term: rf.currentTerm, Cmd: command, Index: rf.SnapShot.Index + len(rf.log)}
 	rf.log = append(rf.log, *newEntry)
 	//rf.persist()
 	return len(rf.log) - 1, rf.currentTerm, true
-}
-
-type AppendEntriesReply struct {
-	// Your data here (2A).
-	Term    int  // currentTerm, for leader to update itself
-	Success bool // true if follower contained entry matching prevLogIndex and prevLogTerm
 }
 
 // RequestVote 处理投票
@@ -280,8 +267,9 @@ func Make(peers []*RpcNode, index int, PersistFileName string) *Raft {
 	if len(rf.log) == 0 {
 		rf.log = make([]Entry, 0)
 		rf.log = append(rf.log, Entry{
-			Term: 0,
-			Cmd:  nil,
+			Term:  0,
+			Cmd:   nil,
+			Index: 0,
 		})
 	} else {
 		for i := 0; i < len(rf.nextIndex); i++ {
@@ -379,14 +367,31 @@ func (rf *Raft) sendHeartBeats() {
 	//}()
 }
 
+type AppendEntriesReply struct {
+	// Your data here (2A).
+	Term    int  // currentTerm, for leader to update itself
+	Success bool // true if follower contained entry matching prevLogIndex and prevLogTerm
+}
+
+type AppendEntriesArgs struct {
+	// Your data here (2A, 2B).
+	Term     int // leader’s term
+	LeaderId int // so follower can redirect clients
+
+	//上一条 log 值的 index 和 term, follower 会利用这两个值校验缺失和冲突.
+	PrevLogIndex int // 新日志条目之前的日志条目的索引
+	PrevLogTerm  int // prevLogIndex 条目的任期
+
+	Entries      []Entry // 要存储的日志条目（心跳时为空；为了提高效率，可能发送多个条目）
+	LeaderCommit int     // leader 的 commitIndex
+}
+
 // 发送 (心跳/日志) rpc消息
 func (rf *Raft) handleAppendEntries(serverTo int, args *AppendEntriesArgs) {
 	//fmt.Println("发送心跳rpc ", serverTo, args)
 	reply := &AppendEntriesReply{}
 	sendArgs := *args // 复制一份args结构体, (可能有未知的错误)
 	ok := rf.sendAppendEntries(serverTo, &sendArgs, reply)
-	//fmt.Println(ok)
-
 	if !ok {
 		return
 	}
@@ -440,7 +445,6 @@ func (rf *Raft) handleAppendEntries(serverTo int, args *AppendEntriesArgs) {
 		rf.role = Follower
 		rf.votedFor = -1
 		rf.timeStamp = time.Now()
-		rf.mu.Unlock()
 		rf.persist()
 		return
 	}
@@ -451,7 +455,7 @@ func (rf *Raft) handleAppendEntries(serverTo int, args *AppendEntriesArgs) {
 		// term仍然相同, 且自己还是leader, 表名对应的follower在prevLogIndex位置没有与prevLogTerm匹配的项
 		// 将nextIndex自减再重试
 		rf.nextIndex[serverTo] -= 1
-		rf.mu.Unlock()
+		//todo 当 nextIndex 低于 rf.snapshot.index 的时候，则需要发送snapshot
 		return
 	}
 }
