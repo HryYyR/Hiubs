@@ -23,6 +23,7 @@ const (
 
 var HeartBeatTimeOut = 200
 var CommitCheckTimeInterval = 1000
+var SnapShotTimeInterval = 10
 
 // 在 3D 部分中，你将需要通过 applyCh 发送其他类型的消息（例如快照），
 // 但对于这些用途，请将 CommandValid 设置为 false。
@@ -46,12 +47,13 @@ type Entry struct {
 }
 
 type Raft struct {
-	StateMachine sync.Map
-	mu           sync.Mutex // 锁，保护该节点状态的并发访问
-	peers        []*RpcNode // 所有节点的 RPC 终端
-	persister    *Persister // 用于保存该节点的持久状态
-	me           int        // 节点在 peers[] 中的索引
-	dead         int32      // 通过 Kill() 设置，标记节点是否已被终止
+	StateMachine StateMachine //状态机
+	SnapShot     SnapShot     //快照
+	mu           sync.Mutex   // 锁，保护该节点状态的并发访问
+	peers        []*RpcNode   // 所有节点的 RPC 终端
+	persister    *Persister   // 用于保存该节点的持久状态
+	me           int          // 节点在 peers[] 中的索引
+	dead         int32        // 通过 Kill() 设置，标记节点是否已被终止
 
 	// 用于存放 Raft 节点的状态数据（在 3A、3B、3C 中实现）。
 	// 详见论文图 2 中 Raft 服务器需要维护的状态描述。
@@ -115,11 +117,23 @@ func (rf *Raft) persist() {
 	e.Encode(rf.currentTerm)
 	e.Encode(rf.log)
 	raftstate := w.Bytes()
-	rf.persister.Save(raftstate, nil, rf.me)
+
+	rf.persister.Save(raftstate, rf.me)
 }
 
 // restore previously persisted state.
-func (rf *Raft) readPersist(data []byte) {
+func (rf *Raft) readPersist(PersistFileName string, index int) {
+	//读取持久化文件
+	data, err := os.ReadFile(fmt.Sprintf("./%s%d.txt", PersistFileName, index))
+	if err != nil {
+		fmt.Println("读取文件失败 开始创建:", err)
+		create, err := os.Create(fmt.Sprintf("./%s%d.txt", PersistFileName, index))
+		if err != nil {
+			panic(err)
+		}
+		create.Close()
+	}
+
 	if data == nil {
 		return
 	}
@@ -148,7 +162,7 @@ func (rf *Raft) readPersist(data []byte) {
 			if entry.Cmd == nil {
 				continue
 			}
-			rf.HandleCommand(entry.Cmd.(string))
+			rf.StateMachine.HandleCommand(entry.Cmd.(string))
 		}
 	}
 }
@@ -164,6 +178,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	newEntry := &Entry{Term: rf.currentTerm, Cmd: command}
 	rf.log = append(rf.log, *newEntry)
+	//rf.persist()
 	return len(rf.log) - 1, rf.currentTerm, true
 }
 
@@ -241,28 +256,23 @@ func (rf *Raft) killed() bool {
 func Make(peers []*RpcNode, index int, PersistFileName string) *Raft {
 	rf := &Raft{}
 
-	//读取持久化文件
-	persist, err := os.ReadFile(fmt.Sprintf("./%s%d.txt", PersistFileName, index))
-	if err != nil {
-		fmt.Println("读取文件失败:", err)
-		create, err := os.Create(fmt.Sprintf("./%s%d.txt", PersistFileName, index))
-		if err != nil {
-			panic(err)
-		}
-		create.Close()
-	}
 	persister := &Persister{
 		filename: PersistFileName,
 	}
 	rf.persister = persister
 
-	rf.StateMachine = sync.Map{}
+	rf.StateMachine = StateMachine{Data: &sync.Map{}}
 	rf.peers = peers
 	rf.me = index
 	rf.role = Follower
 	rf.applyCh = make(chan ApplyMsg, 1024)
 
-	rf.readPersist(persist)
+	shot := rf.ReadSnapShot(PersistFileName, index)
+	if shot {
+		fmt.Println("快照加载成功")
+		rf.lastApplied = rf.SnapShot.Index
+	}
+	rf.readPersist(PersistFileName, index)
 
 	rf.nextIndex = make([]int, len(peers))
 	rf.matchIndex = make([]int, len(peers))
@@ -282,8 +292,19 @@ func Make(peers []*RpcNode, index int, PersistFileName string) *Raft {
 	go rf.ticker()
 	go rf.CommitChecker()
 	go rf.ApplyState()
+	go rf.SnapShotTicker()
 
 	return rf
+}
+
+func (rf *Raft) SnapShotTicker() {
+	// 检查是否有新的commit
+	for !rf.killed() {
+		rf.mu.Lock()
+		rf.SaveSnapShot()
+		rf.mu.Unlock()
+		time.Sleep(time.Duration(SnapShotTimeInterval) * time.Second)
+	}
 }
 
 func (rf *Raft) CommitChecker() {
@@ -297,6 +318,7 @@ func (rf *Raft) CommitChecker() {
 				Command:      rf.log[rf.lastApplied].Cmd,
 				CommandIndex: rf.lastApplied,
 			}
+			rf.persist()
 			fmt.Printf("server %v 准备将命令 %v(索引为 %v ) 应用到状态机\n", rf.me, msg.Command, msg.CommandIndex)
 			rf.applyCh <- *msg
 		}
@@ -305,8 +327,8 @@ func (rf *Raft) CommitChecker() {
 	}
 }
 
-// SendHeartBeats 发送心跳
-func (rf *Raft) SendHeartBeats() {
+// sendHeartBeats 发送心跳
+func (rf *Raft) sendHeartBeats() {
 	fmt.Printf("server %v 开始发送心跳\n", rf.me)
 
 	for !rf.killed() {
@@ -370,10 +392,7 @@ func (rf *Raft) handleAppendEntries(serverTo int, args *AppendEntriesArgs) {
 	}
 
 	rf.mu.Lock()
-	defer func() {
-		// DPrintf("server %v handleAppendEntries 释放锁mu", rf.me)
-		rf.mu.Unlock()
-	}()
+	defer rf.mu.Unlock()
 
 	if sendArgs.Term != rf.currentTerm {
 		// 函数调用间隙值变了
@@ -401,11 +420,13 @@ func (rf *Raft) handleAppendEntries(serverTo int, args *AppendEntriesArgs) {
 			}
 			if count > len(rf.peers)/2 {
 				// 如果至少一半的follower回复了成功, 更新commitIndex
+				rf.persist()
+
 				break
 			}
 			N -= 1
 		}
-
+		//执行更新commitIndex
 		rf.commitIndex = N
 
 		return
@@ -531,15 +552,15 @@ func (rf *Raft) ticker() {
 			// 选举超时，触发选举
 			rf.mu.Unlock()
 			fmt.Println("超时，开始选举", rf.me)
-			go rf.Elect()
+			go rf.elect()
 		} else {
 			rf.mu.Unlock()
 		}
 	}
 }
 
-// Elect 开始选举
-func (rf *Raft) Elect() {
+// elect 开始选举
+func (rf *Raft) elect() {
 	var muVote sync.Mutex // 临时的投票锁
 	muVote.Lock()
 	rf.mu.Lock()
@@ -572,7 +593,7 @@ func (rf *Raft) Elect() {
 
 // 收集选票
 func (rf *Raft) collectVote(serverTo int, args *RequestVoteArgs, muVote *sync.Mutex, voteCount *int) {
-	voteAnswer := rf.GetVoteAnswer(serverTo, args)
+	voteAnswer := rf.getVoteAnswer(serverTo, args)
 	//fmt.Println(serverTo, voteAnswer)
 	if !voteAnswer {
 		return
@@ -601,13 +622,13 @@ func (rf *Raft) collectVote(serverTo int, args *RequestVoteArgs, muVote *sync.Mu
 			rf.matchIndex[i] = 0
 		}
 		rf.mu.Unlock()
-		go rf.SendHeartBeats()
+		go rf.sendHeartBeats()
 	}
 
 	muVote.Unlock()
 }
 
-func (rf *Raft) GetVoteAnswer(server int, args *RequestVoteArgs) bool {
+func (rf *Raft) getVoteAnswer(server int, args *RequestVoteArgs) bool {
 	sendArgs := *args
 	reply := RequestVoteReply{}
 	ok := rf.sendRequestVote(server, &sendArgs, &reply)

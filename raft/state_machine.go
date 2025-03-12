@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync"
 )
 
 var (
@@ -14,32 +15,41 @@ var (
 	FUNC_ALL = "all"
 )
 
-var commondList = []string{
+type StateMachine struct {
+	Data *sync.Map
+}
+
+var CommandList = []string{
 	"get",
 	"set",
 	"del",
 	"all",
 }
 
-func (rf *Raft) get(key string) (string, bool) {
-	value, ok := rf.StateMachine.Load(key)
+var UnPersistCommand = []string{
+	"get",
+	"all",
+}
+
+func (this *StateMachine) get(key string) (string, bool) {
+	value, ok := this.Data.Load(key)
 	return value.(string), ok
 }
 
-func (rf *Raft) set(key, value string) {
-	rf.StateMachine.Store(key, value)
+func (this *StateMachine) set(key, value string) {
+	this.Data.Store(key, value)
 }
 
-func (rf *Raft) all() map[string]string {
+func (this *StateMachine) all() map[string]string {
 	var res = make(map[string]string)
-	rf.StateMachine.Range(func(key, value any) bool {
+	this.Data.Range(func(key, value any) bool {
 		res[key.(string)] = value.(string)
 		return true
 	})
 	return res
 }
 
-func (rf *Raft) HandleCommand(command string) (string, bool) {
+func (this *StateMachine) HandleCommand(command string) (string, bool) {
 	//是否为合法命令
 	commandSplit := strings.Split(command, " ")
 	if len(commandSplit) < 1 {
@@ -47,7 +57,7 @@ func (rf *Raft) HandleCommand(command string) (string, bool) {
 		return "", false
 	}
 
-	contains := slices.Contains(commondList, commandSplit[0])
+	contains := slices.Contains(CommandList, commandSplit[0])
 	if !contains {
 		fmt.Println("非法指令(非法命令)", command)
 		return "", false
@@ -58,22 +68,22 @@ func (rf *Raft) HandleCommand(command string) (string, bool) {
 		if len(commandSplit) != 2 {
 			return "", false
 		}
-		value, ok := rf.get(commandSplit[1])
+		value, ok := this.get(commandSplit[1])
 		return value, ok
 	case FUNC_SET:
 		if len(commandSplit) != 3 {
 			return "", false
 		}
-		rf.set(commandSplit[1], commandSplit[2])
+		this.set(commandSplit[1], commandSplit[2])
 		return "", true
 	case FUNC_DEL:
 		if len(commandSplit) != 2 {
 			return "", false
 		}
-		rf.StateMachine.Delete(commandSplit[1])
+		this.Data.Delete(commandSplit[1])
 		return "", true
 	case FUNC_ALL:
-		all := rf.all()
+		all := this.all()
 		allBytes, _ := json.Marshal(all)
 		fmt.Println(string(allBytes))
 		return string(allBytes), true
@@ -88,7 +98,7 @@ func (rf *Raft) ApplyState() {
 	for !rf.killed() {
 		select {
 		case applyMsg := <-rf.applyCh:
-			rf.HandleCommand(applyMsg.Command.(string))
+			rf.StateMachine.HandleCommand(applyMsg.Command.(string))
 		}
 	}
 
