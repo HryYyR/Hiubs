@@ -10,6 +10,7 @@ type RpcNode struct {
 	Address  string
 	RaftPort int
 	HttpPort int
+	TcpPort  int
 	Index    int
 }
 
