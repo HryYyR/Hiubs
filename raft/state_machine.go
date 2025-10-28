@@ -9,10 +9,12 @@ import (
 )
 
 var (
-	FUNC_GET = "get"
-	FUNC_SET = "set"
-	FUNC_DEL = "del"
-	FUNC_ALL = "all"
+	FUNC_GET        = "get"
+	FUNC_SET        = "set"
+	FUNC_DEL        = "del"
+	FUNC_ALL        = "all"
+	FUNC_REGISTER   = "register"
+	FUNC_HEART_BEAT = "heartbeat"
 )
 
 type StateMachine struct {
@@ -24,23 +26,26 @@ var CommandList = []string{
 	"set",
 	"del",
 	"all",
+	"register",
+	"heartbeat",
 }
 
 var UnPersistCommand = []string{
 	"get",
 	"all",
+	"heartbeat",
 }
 
-func (this *StateMachine) get(key string) (string, bool) {
+func (this *StateMachine) Get(key string) (string, bool) {
 	value, ok := this.Data.Load(key)
 	return value.(string), ok
 }
 
-func (this *StateMachine) set(key, value string) {
+func (this *StateMachine) Set(key, value string) {
 	this.Data.Store(key, value)
 }
 
-func (this *StateMachine) all() map[string]string {
+func (this *StateMachine) All() map[string]string {
 	var res = make(map[string]string)
 	this.Data.Range(func(key, value any) bool {
 		res[key.(string)] = value.(string)
@@ -68,13 +73,13 @@ func (this *StateMachine) HandleCommand(command string) (string, bool) {
 		if len(commandSplit) != 2 {
 			return "", false
 		}
-		value, ok := this.get(commandSplit[1])
+		value, ok := this.Get(commandSplit[1])
 		return value, ok
 	case FUNC_SET:
 		if len(commandSplit) != 3 {
 			return "", false
 		}
-		this.set(commandSplit[1], commandSplit[2])
+		this.Set(commandSplit[1], commandSplit[2])
 		return "", true
 	case FUNC_DEL:
 		if len(commandSplit) != 2 {
@@ -83,9 +88,8 @@ func (this *StateMachine) HandleCommand(command string) (string, bool) {
 		this.Data.Delete(commandSplit[1])
 		return "", true
 	case FUNC_ALL:
-		all := this.all()
+		all := this.All()
 		allBytes, _ := json.Marshal(all)
-		fmt.Println(string(allBytes))
 		return string(allBytes), true
 
 	default:

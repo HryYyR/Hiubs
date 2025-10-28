@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"net/http"
 	"raft/raft"
-	"slices"
-	"strings"
 )
 
 var (
@@ -22,43 +20,10 @@ type CommandResponse struct {
 func commitService(w http.ResponseWriter, r *http.Request) {
 	var res CommandResponse
 	cmd := r.URL.Query().Get("cmd")
-	cmd, valid := CheckCommandValid(cmd)
-	if !valid {
-		res.Ret = COMMAND_INVALID
-		resByte, _ := json.Marshal(res)
-		w.Write(resByte)
-		return
-	}
 
-	cmdsplit := strings.Split(cmd, " ")
-
-	if !slices.Contains(raft.CommandList, cmdsplit[0]) {
-		res.Ret = COMMAND_INVALID
-		resByte, _ := json.Marshal(res)
-		w.Write(resByte)
-		return
-	}
-
-	if slices.Contains(raft.UnPersistCommand, cmdsplit[0]) {
-		data, success := raft.GetRaftCluster().StateMachine.HandleCommand(cmd)
-		if !success {
-			res.Ret = COMMAND_INVALID
-			resByte, _ := json.Marshal(res)
-			w.Write(resByte)
-			return
-		}
-		res.Data = data
-	} else {
-		_, _, success := raft.GetRaftCluster().Start(cmd)
-		if !success {
-			res.Ret = COMMAND_INVALID
-			resByte, _ := json.Marshal(res)
-			w.Write(resByte)
-			return
-		}
-	}
-
-	res.Ret = COMMAND_OK
+	response, ret := HandleCommand(cmd)
+	res.Ret = ret
+	res.Data = response
 	resByte, err := json.Marshal(res)
 	if err != nil {
 		fmt.Println("marshal error", err)

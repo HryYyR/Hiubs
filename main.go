@@ -13,6 +13,7 @@ import (
 var index int
 var raftPort int
 var httpPort int
+var tcpPort int
 var address string
 var configPath string
 
@@ -44,6 +45,9 @@ func main() {
 
 	//启动httpAPI
 	go handler.RegisterHandler(httpPort)
+
+	//启动TCP服务器
+	go handler.StartTCPServer(tcpPort)
 
 	fmt.Println("raft server listening at ", raftPort)
 	rpc.Accept(listener)

@@ -536,7 +536,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	reply.Term = rf.currentTerm
 
 	if args.LeaderCommit > rf.commitIndex {
-		// 5.If leaderCommit > commitIndex, set commitIndex = min(leaderCommit, index of last new entry)
+		// 5.If leaderCommit > commitIndex, Set commitIndex = min(leaderCommit, index of last new entry)
 		rf.commitIndex = int(math.Min(float64(args.LeaderCommit), float64(len(rf.log)-1)))
 		fmt.Println("更新commitIndex 为", rf.commitIndex)
 	}
